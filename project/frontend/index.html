@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NutriBudget</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<main id="app">
+
+<!-- 1. Khởi động -->
+<section class="screen active center" id="welcome">
+  <svg class="logo" viewBox="0 0 96 96" aria-label="NutriBudget"><circle cx="48" cy="48" r="48" fill="#1f7a4d"/><path d="M30 62C28 40 42 28 66 28c2 24-8 38-30 38-3 0-5-2-6-4z" fill="#fff"/><path d="M36 60C45 50 52 43 59 36" stroke="#1f7a4d" stroke-width="3" stroke-linecap="round" fill="none"/><circle cx="68" cy="68" r="7" fill="#fcd34d"/></svg>
+  <h1 class="big">Chào mừng bạn đến với<br>NutriBudget</h1>
+  <p class="muted">Kế hoạch dinh dưỡng phù hợp với túi tiền của bạn.</p>
+  <ul class="feat">
+    <li>🎯 Hiểu rõ nhu cầu dinh dưỡng của cơ thể</li>
+    <li>🍱 Thực đơn phù hợp mục tiêu và ngân sách</li>
+    <li>💰 Tối ưu chi phí ăn uống mỗi ngày</li>
+  </ul>
+  <button class="btn" data-go="profile" data-enter>START</button>
+  <button class="link" data-go="saved">📁 Thực đơn đã lưu (<span id="saved-count">0</span>)</button>
+</section>
+
+<!-- 2. Thông tin hồ sơ -->
+<section class="screen" id="profile">
+  <h2 class="chip">Thông tin hồ sơ</h2>
+  <p class="muted">Cho NutriBudget xác thông tin về cơ thể bạn</p>
+  <form id="profile-form" novalidate>
+    <div class="field"><label>Họ và tên</label><input name="name" type="text" placeholder="Nhập họ và tên"><small class="err" data-err="name"></small></div>
+    <div class="field"><label>Tuổi</label><input name="age" type="text" inputmode="numeric" autocomplete="off" maxlength="3" placeholder="28"><small class="err" data-err="age"></small></div>
+    <div class="field"><label>Giới tính</label>
+      <div class="seg">
+        <label><input type="radio" name="gender" value="male" checked><span>Nam</span></label>
+        <label><input type="radio" name="gender" value="female"><span>Nữ</span></label>
+      </div></div>
+    <div class="row2">
+      <div class="field"><label>Chiều cao</label><div class="unit"><input name="height" type="text" inputmode="decimal" autocomplete="off" placeholder="170"><i>cm</i></div><small class="err" data-err="height"></small></div>
+      <div class="field"><label>Cân nặng</label><div class="unit"><input name="weight" type="text" inputmode="decimal" autocomplete="off" placeholder="65"><i>kg</i></div><small class="err" data-err="weight"></small></div>
+    </div>
+    <button class="btn" type="submit">Tiếp tục →</button>
+  </form>
+</section>
+
+<!-- 3. Tìm hiểu kế hoạch -->
+<section class="screen" id="plan">
+  <button class="back" data-go="profile">‹ Quay lại</button>
+  <h2 class="chip">Tìm hiểu kế hoạch</h2>
+  <form id="plan-form">
+    <h3>Mức độ vận động</h3><div class="opts" id="activity-opts"></div>
+    <h3>Mục tiêu</h3><div class="opts" id="goal-opts"></div>
+    <button class="btn" type="submit">Thiết lập chế độ dinh dưỡng →</button>
+  </form>
+</section>
+
+<!-- 4. Tính toán -->
+<section class="screen center" id="calc">
+  <div class="ring"><svg viewBox="0 0 80 80"><circle class="ring-bg" cx="40" cy="40" r="34"/><circle class="ring-fg" cx="40" cy="40" r="34"/></svg><b class="ring-pct">0%</b></div>
+  <h2>Thiết lập chế độ dinh dưỡng cho bạn</h2>
+  <p class="muted">NutriBudget đang tính toán nhu cầu dinh dưỡng phù hợp với cơ thể bạn.</p>
+  <ul class="steps">
+    <li id="calc-goal">Ưu tiên mục tiêu của bạn</li>
+    <li>Tính nhu cầu năng lượng &amp; dinh dưỡng</li>
+    <li>Xem xét mức độ phù hợp</li>
+  </ul>
+</section>
+
+<!-- 5. Kết quả macro -->
+<section class="screen" id="result">
+  <button class="back" data-go="plan">‹ Quay lại</button>
+  <span class="badge">Kế hoạch của bạn đã sẵn sàng</span>
+  <p class="muted sm">Tổng năng lượng mỗi ngày</p>
+  <div class="kcal"><span id="r-kcal">0</span><small>kcal</small></div>
+  <div class="grid3">
+    <div class="mac"><small>Chất đạm</small><b id="r-protein">0g</b></div>
+    <div class="mac"><small>Chất béo</small><b id="r-fat">0g</b></div>
+    <div class="mac"><small>Tinh bột</small><b id="r-carb">0g</b></div>
+  </div>
+  <div class="note"><b>💡 Tại sao có kết quả này?</b><p id="r-explain"></p></div>
+  <div class="warn" id="r-warn" hidden></div>
+  <div class="bmi" id="r-bmi"></div>
+  <button class="btn" data-go="budget" data-enter>Đi tới ngân sách →</button>
+  <button class="link" data-go="profile">Chỉnh sửa thông tin của tôi</button>
+</section>
+
+<!-- 6/8. Ngân sách -->
+<section class="screen" id="budget">
+  <button class="back" data-go="result">‹ Quay lại</button>
+  <h2 class="chip">Thiết lập ngân sách ăn uống</h2>
+  <p class="muted">NutriBudget sẽ tìm thực đơn đủ dinh dưỡng trong mức chi phí bạn đặt ra.</p>
+  <form id="budget-form" novalidate>
+    <h3>Bạn muốn chi bao nhiêu?</h3>
+    <div class="tabs"><button type="button" class="tab active" data-period="monthly">Theo tháng</button><button type="button" class="tab" data-period="weekly">Theo tuần</button></div>
+    <div class="unit big-in"><input id="b-amount" inputmode="numeric" autocomplete="off" placeholder="900,000"><i>VND</i></div>
+    <small class="err" id="b-err"></small>
+    <div class="kv"><span>Theo ngày</span><b id="b-daily">—</b></div>
+    <div class="kv"><span id="b-other-l">Theo tuần</span><b id="b-other">—</b></div>
+    <div class="suggest" id="b-suggest" hidden>
+      <b>Ngân sách gợi ý / <span id="s-period">tháng</span></b><div class="sv" id="s-amount"></div>
+      <div class="kv"><span>Ngân sách đã đặt</span><b id="s-have"></b></div>
+      <div class="kv"><span>Cần bổ sung thêm</span><b id="s-need" class="red"></b></div>
+    </div>
+    <div class="card"><b>Nhu cầu mỗi ngày 🔒</b><div class="sv"><span id="b-kcal">0</span> kcal</div>
+      <div class="grid3 flat"><div><b id="b-p">0g</b><small>Protein</small></div><div><b id="b-f">0g</b><small>Chất béo</small></div><div><b id="b-c">0g</b><small>Tinh bột</small></div></div></div>
+    <div class="field"><label>Dị ứng / sở thích (không bắt buộc)</label><input id="b-notes" maxlength="200" placeholder="VD: dị ứng hải sản, ưu tiên món chay"></div>
+    <button class="btn" type="submit">Tạo thực đơn phù hợp →</button>
+  </form>
+  <div class="modal" id="modal" hidden><div class="sheet">
+    <h3 class="red">❗ Thêm một chút để đủ chất</h3>
+    <div class="alert"><b>Ngân sách chưa đủ</b><p id="m-msg"></p></div>
+    <div class="suggest" id="m-suggest"><b>Ngân sách gợi ý / <span id="m-period">tháng</span></b><div class="sv" id="m-amount"></div>
+      <div class="kv"><span>Ngân sách đã đặt</span><b id="m-have"></b></div>
+      <div class="kv"><span>Cần bổ sung</span><b id="m-need" class="red"></b></div></div>
+    <button class="btn" id="m-adjust">Điều chỉnh ngân sách</button>
+  </div></div>
+</section>
+
+<!-- 9. Đang tối ưu -->
+<section class="screen center" id="optimizing">
+  <div class="ring"><svg viewBox="0 0 80 80"><circle class="ring-bg" cx="40" cy="40" r="34"/><circle class="ring-fg" cx="40" cy="40" r="34"/></svg><b>🍴</b></div>
+  <h2>Đang tối ưu thực đơn</h2>
+  <p class="muted">NutriBudget đang tìm các món phù hợp nhất với nhu cầu dinh dưỡng và chi phí của bạn.</p>
+  <ul class="steps">
+    <li>Đã xác định nhu cầu dinh dưỡng</li>
+    <li>Đang phân tích tối ưu</li>
+    <li>Chọn món và tối ưu ngân sách</li>
+  </ul>
+  <p class="muted sm" id="o-budget"></p>
+  <button class="link" id="cancel-opt">Chỉnh sửa ngân sách</button>
+</section>
+
+<!-- Thực đơn phù hợp -->
+<section class="screen" id="menu">
+  <button class="back" id="menu-back" data-go="budget">‹ Quay lại</button>
+  <div class="alert" id="menu-warn" hidden></div>
+  <span class="badge" id="menu-saved-label" hidden></span>
+  <h3>Tổng dinh dưỡng / ngày</h3>
+  <div class="grid2">
+    <div class="mac"><small>Tổng năng lượng</small><b id="m-kcal">0 kcal</b></div>
+    <div class="mac"><small>Chất đạm</small><b id="m-p">0g</b></div>
+    <div class="mac"><small>Chất béo</small><b id="m-f">0g</b></div>
+    <div class="mac"><small>Tinh bột</small><b id="m-c">0g</b></div>
+  </div>
+  <div class="cost">
+    <small>Chi phí ước tính / <span id="c-period">tháng</span></small>
+    <div class="cost-row"><b id="c-total">0đ</b><em id="c-pct">0%</em></div>
+    <div class="bar"><i id="c-bar"></i></div>
+    <div class="cost-row sm"><span id="c-budget"></span><span id="c-left" class="gr"></span></div>
+  </div>
+  <h3>Thực đơn hôm nay</h3><p class="muted sm" id="m-count"></p>
+  <div id="meals"></div>
+  <p class="muted sm">Kết quả mang tính tham khảo. Hãy tham khảo chuyên gia dinh dưỡng khi cần.</p>
+  <div id="menu-actions"><button class="btn ghost" data-go="budget">Điều chỉnh thực đơn</button><button class="btn" id="save-menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg><span id="save-label">Lưu thực đơn</span></button></div>
+  <button class="link" id="menu-saved-link" data-go="saved">📁 Xem thực đơn đã lưu</button>
+  <button class="btn ghost" id="delete-saved" hidden>Xóa thực đơn này</button>
+</section>
+
+<!-- Thực đơn đã lưu -->
+<section class="screen" id="saved">
+  <button class="back" data-go="welcome">‹ Quay lại</button>
+  <h2 class="chip">Thực đơn đã lưu</h2>
+  <p class="muted">Các thực đơn bạn đã lưu trên trình duyệt này.</p>
+  <div id="saved-list"></div>
+</section>
+
+</main>
+<div id="toast" hidden></div>
+<script>
+  window.NB_API_URL = (location.port === "8000") ? location.origin : "https://christine-balmy-tasha.ngrok-free.dev";
+</script>
+<script src="js/form1.js"></script>
+<script src="js/form2.js"></script>
+<script src="js/result.js"></script>
+</body>
+</html>

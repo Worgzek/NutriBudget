@@ -1,3 +1,4 @@
+
 """
 app/meal_planning/optimizer.py
  
@@ -18,6 +19,7 @@ import pulp
 PERIOD_DAYS = {"weekly": 7, "monthly": 30}
 MAX_UNITS_PER_FOOD = 4  # 4 x 100g = 400g/ngày/loại
 CALORIE_TOLERANCE = 0.10  # +-10% quanh target
+MIN_VEGETABLE_G = 150  # tối thiểu rau/ngày - tránh solver bỏ qua rau hoàn toàn vì chỉ tối ưu chi phí
  
 MEAL_SPLIT = [
     ("Bữa sáng", 0.25),
@@ -54,6 +56,14 @@ def _build_and_solve(macro_targets: dict, daily_budget: float, food_db: list,
     total_calories = pulp.lpSum(food["calories"] * x[food["name"]] for food in food_db)
     prob += total_calories <= macro_targets["calories"] * (1 + CALORIE_TOLERANCE)
     prob += total_calories >= macro_targets["calories"] * (1 - CALORIE_TOLERANCE)
+ 
+    # Ràng buộc rau tối thiểu - solver chỉ tối ưu chi phí nên có xu hướng bỏ hẳn rau
+    # (rau đóng góp ít protein/fat). Chỉ thêm ràng buộc nếu food_db có rau để chọn,
+    # tránh vô nghiệm ngay lập tức nếu lỡ không còn rau nào (vd: bị lọc dị ứng hết).
+    vegetable_foods = [food for food in food_db if food["category"] == "vegetable"]
+    if vegetable_foods:
+        total_vegetable_units = pulp.lpSum(x[food["name"]] for food in vegetable_foods)
+        prob += total_vegetable_units >= MIN_VEGETABLE_G / 100
  
     # Ràng buộc ngân sách - có thể tắt khi cần thử "nếu không giới hạn budget thì tốn tối thiểu bao nhiêu"
     if enforce_budget:
@@ -110,20 +120,37 @@ def _build_meals(x_values: dict, food_db: list) -> list:
     return meals
  
  
+def _try_solve_saver(macro_targets: dict, daily_budget: float, food_db: list):
+    """Thử tìm giải pháp cứu vãn (Saver Plan) trong ngân sách hiện tại bằng cách
+    tự động điều chỉnh nhẹ 15-25% chỉ tiêu dinh dưỡng nhưng vẫn giữ mức an toàn."""
+    for scale in [0.85, 0.80, 0.75]:
+        scaled_targets = {
+            "calories": macro_targets["calories"] * scale,
+            "protein_g": macro_targets["protein_g"] * scale,
+            "fat_g": macro_targets["fat_g"] * scale,
+            "carb_g": macro_targets["carb_g"] * scale,
+        }
+        status, x_val, cost = _build_and_solve(scaled_targets, daily_budget, food_db, enforce_budget=True)
+        if status == "Optimal":
+            return scale, x_val, cost
+    return None, None, None
+
+
 def optimize_meal_plan(macro_targets: dict, budget: dict, food_db: list) -> dict:
     """
     macro_targets: {"calories", "protein_g", "fat_g", "carb_g"} - target NGÀY (từ Agent 1)
     budget: {"amount", "period"} - "weekly" | "monthly"
     food_db: list các dict {"name","category","price_per_unit","calories","protein","carbs","fat",...}
              ĐÃ lọc dị ứng từ trước khi gọi hàm này.
- 
-    Trả về dict khớp MealPlanResponse (feasible, meals, total_cost_estimate, message, suggested_budget).
+
+    Trả về dict khớp MealPlanResponse (feasible, meals, total_cost_estimate, message, suggested_budget, scenarios).
     """
     daily_budget = _daily_budget(budget)
     days = PERIOD_DAYS[budget["period"]]
- 
+    p_unit = "tuần" if budget["period"] == "weekly" else "tháng"
+
     status, x_values, daily_cost = _build_and_solve(macro_targets, daily_budget, food_db, enforce_budget=True)
- 
+
     if status == "Optimal":
         meals = _build_meals(x_values, food_db)
         return {
@@ -132,31 +159,55 @@ def optimize_meal_plan(macro_targets: dict, budget: dict, food_db: list) -> dict
             "total_cost_estimate": round(daily_cost * days, 0),
             "message": None,
             "suggested_budget": None,
+            "scenarios": None,
         }
- 
+
     # Infeasible - thử lại KHÔNG giới hạn budget, để phân biệt 2 loại nguyên nhân:
     # (a) budget quá thấp so với macro target -> có nghiệm khi bỏ ràng buộc budget
     # (b) macro target không thể đạt được dù food_db/giới hạn 400g có rộng rãi thế nào
     status_relaxed, x_relaxed, min_cost = _build_and_solve(
         macro_targets, daily_budget, food_db, enforce_budget=False
     )
- 
+
     if status_relaxed == "Optimal":
-        suggested_daily_budget = min_cost
+        suggested_total_budget = round(min_cost * days, 0)
+        needed_more = max(suggested_total_budget - budget["amount"], 0)
+
+        # Tự phản biện tìm Kịch bản Tiết kiệm trong ngân sách hiện tại
+        scale_found, x_saver, saver_cost = _try_solve_saver(macro_targets, daily_budget, food_db)
+        saver_meals = _build_meals(x_saver, food_db) if scale_found else []
+
+        scenarios = {
+            "has_remedy": True,
+            "standard_scenario": {
+                "title": "Kịch bản Chuẩn (Tăng nhẹ ngân sách)",
+                "description": f"Bổ sung thêm khoảng {round(needed_more):,.0f}đ/{p_unit} để đạt 100% mục tiêu dinh dưỡng đề ra.",
+                "suggested_budget": suggested_total_budget,
+                "meals": _build_meals(x_relaxed, food_db),
+            },
+            "saver_scenario": {
+                "title": "Kịch bản Tiết kiệm (Vừa khít ngân sách)",
+                "description": f"Giữ nguyên ngân sách {round(budget['amount']):,.0f}đ/{p_unit} bằng cách tối ưu sang nguồn đạm bình dân (-{int((1-scale_found)*100)}% chỉ tiêu).",
+                "meals": saver_meals,
+                "total_cost": round(saver_cost * days, 0) if saver_cost else None,
+            } if saver_meals else None,
+        }
+
         return {
             "feasible": False,
             "meals": [],
             "total_cost_estimate": None,
             "message": (
-                f"Với ngân sách hiện tại, chưa đủ để đạt chỉ tiêu dinh dưỡng đã đề ra. "
-                f"Cần tối thiểu khoảng {round(suggested_daily_budget * days):,.0f}đ/{('tuần' if budget['period']=='weekly' else 'tháng')} "
-                f"để đạt đủ macro trong ngân sách. Bạn muốn tăng ngân sách hay điều chỉnh lại mục tiêu?"
+                f"Với ngân sách hiện tại ({round(budget['amount']):,.0f}đ/{p_unit}), chưa đủ để đạt 100% mục tiêu dinh dưỡng ban đầu "
+                f"(cần tối thiểu khoảng {round(suggested_total_budget):,.0f}đ/{p_unit}, thiếu khoảng {round(needed_more):,.0f}đ). "
+                f"NutriBudget AI đã tự động đề xuất 2 kịch bản giải quyết: Kịch bản Tiết kiệm (vừa khít ngân sách hiện tại) "
+                f"và Kịch bản Chuẩn (tăng ngân sách tối thiểu)."
             ),
-            "suggested_budget": round(suggested_daily_budget * days, 0),
+            "suggested_budget": suggested_total_budget,
+            "scenarios": scenarios,
         }
- 
-    # Vô nghiệm ngay cả khi không giới hạn budget - vấn đề nằm ở macro target hoặc food_db,
-    # không phải ở tiền. Không đưa suggested_budget vì tăng tiền cũng không giải quyết được.
+
+    # Vô nghiệm ngay cả khi không giới hạn budget - vấn đề nằm ở macro target hoặc food_db
     return {
         "feasible": False,
         "meals": [],
@@ -167,5 +218,5 @@ def optimize_meal_plan(macro_targets: dict, budget: dict, food_db: list) -> dict
             "mỗi loại thực phẩm, hoặc danh sách thực phẩm chưa đủ đa dạng."
         ),
         "suggested_budget": None,
+        "scenarios": None,
     }
- 
