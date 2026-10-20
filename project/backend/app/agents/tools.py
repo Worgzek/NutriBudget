@@ -8,7 +8,7 @@ Nguyên tắc: tool ghi kết quả SỐ LIỆU vào session.state (qua ToolCont
 LLM chỉ đọc lại để diễn giải thành câu, không tự tính toán hay tự bịa số.
 """
 
-from typing import Literal
+from typing import Literal, Optional, List
 
 from google.adk.tools.tool_context import ToolContext
 
@@ -22,9 +22,18 @@ Gender = Literal["male", "female"]
 ActivityLevel = Literal["sedentary", "light", "moderate", "heavy"]
 Goal = Literal["weight_loss", "maintain", "muscle_gain"]
 BudgetPeriod = Literal["weekly", "monthly"]
-# Danh mục dị ứng cố định - dùng Literal để schema gửi cho LLM là enum,
-# LLM không thể tự bịa thêm nhóm dị ứng ngoài 5 nhóm này.
-Allergen = Literal["seafood", "dairy", "peanut", "gluten", "egg"]
+# Danh mục dị ứng cố định - đồng bộ với schema API, dữ liệu và giao diện.
+Allergen = Literal["seafood", "dairy", "peanut", "gluten", "egg", "soy", "sesame"]
+
+
+def _record_step(tool_context: ToolContext, actor: str, action: str, status: str, summary: str):
+    trace = tool_context.state.setdefault("agent_trace", [])
+    trace.append({
+        "actor": actor,
+        "action": action,
+        "status": status,
+        "summary": summary,
+    })
 
 
 def run_nutrition_calculation(
@@ -36,8 +45,7 @@ def run_nutrition_calculation(
     goal: Goal,
     tool_context: ToolContext,
 ) -> dict:
-    """Tính BMR, TDEE, chỉ tiêu macro (calories/protein/fat/carb) và cảnh báo an toàn
-    (nếu có) từ thông tin cơ thể và mục tiêu của người dùng.
+    """Tính BMR, TDEE, chỉ tiêu macro (calories/protein/fat/carb).
 
     Luôn gọi tool này khi đã có đủ 6 thông tin: weight_kg, height_cm, age, gender,
     activity_level, goal. Không tự suy luận hay ước lượng số liệu - tool tính chính xác.
@@ -75,6 +83,10 @@ def run_nutrition_calculation(
         "carb_g": result["carb_g"],
     }
     tool_context.state["warnings"] = result["warnings"]
+    _record_step(
+        tool_context, "Nutrition Engine", "calculate_nutrition", "completed",
+        "Đã tính mục tiêu dinh dưỡng bằng công thức xác định.",
+    )
     return result
 
 
@@ -83,22 +95,38 @@ def generate_meal_plan(
     budget_period: BudgetPeriod,
     allergens: list[Allergen],
     tool_context: ToolContext,
+    max_price_per_unit: Optional[float] = None,
+    exclude_foods: Optional[List[str]] = None,
+    reflection_note: Optional[str] = None,
 ) -> dict:
     """Tạo thực đơn tối ưu chi phí, đạt đủ chỉ tiêu dinh dưỡng đã tính trước đó
     (lấy từ session, KHÔNG cần truyền lại), trong giới hạn ngân sách.
 
-    Chỉ gọi tool này sau khi đã xác định xong allergens từ ghi chú người dùng.
+    Hỗ trợ vòng lặp Tự phản biện & Tự sửa sai (Self-Reflection Loop):
+    - Khi ngân sách eo hẹp (lượt trước infeasible): truyền max_price_per_unit (ví dụ: 18000 hoặc 20000)
+      để tự động loại trừ nguyên liệu đắt đỏ, dồn ngân sách vào các nguồn đạm kinh tế.
+    - Khi phát hiện món ăn bị lặp lại đơn điệu giữa các bữa: truyền exclude_foods (ví dụ: ["Trứng gà"])
+      để yêu cầu solver thay thế món đạm khác cho hài hòa.
+    - reflection_note: ghi lại lập luận phản biện của Agent để hiển thị trên vết thực thi (trace).
 
     Args:
         budget_amount: Số tiền ngân sách.
         budget_period: "weekly" hoặc "monthly".
-        allergens: Danh sách nhóm dị ứng người dùng thực sự đề cập trong ghi chú.
-            CHỈ dùng giá trị trong: "seafood", "dairy", "peanut", "gluten", "egg".
-            Truyền list rỗng [] nếu không có dị ứng nào được đề cập.
+        allergens: Danh sách nhóm dị ứng người dùng đã chọn rõ ràng.
+        tool_context: Ngữ cảnh phiên làm việc ADK.
+        max_price_per_unit: Trần giá tối đa của mỗi đơn vị (100g) nguyên liệu để tự điều chỉnh khi thiếu kinh phí.
+        exclude_foods: Danh sách tên món ăn cụ thể Agent muốn loại trừ sau khi tự phản biện tính hài hòa.
+        reflection_note: Lập luận tự phản biện và lý do điều chỉnh của Agent.
 
     Returns:
-        dict gồm feasible, meals, total_cost_estimate, message, suggested_budget.
+        dict gồm feasible, meals, total_cost_estimate, message, suggested_budget, scenarios, agent_reflection.
     """
+    if reflection_note:
+        _record_step(
+            tool_context, "Meal Planning Agent", "self_reflection", "completed",
+            reflection_note,
+        )
+
     macro_targets = tool_context.state.get("macro_targets")
     if macro_targets is None:
         return {
@@ -106,30 +134,89 @@ def generate_meal_plan(
                      "(gọi run_nutrition_calculation) trước khi tạo thực đơn."
         }
 
-    food_db = get_food_db(exclude_allergens=allergens)
+    requested_allergens = tool_context.state.get("meal_plan_requested_allergens")
+    selected_allergens = sorted(set(
+        requested_allergens if isinstance(requested_allergens, list) else (allergens or [])
+    ))
+    rotation_exclusions = sorted(set(tool_context.state.get("meal_plan_rotation_exclusions") or []))
+    tool_context.state["meal_plan_filters"] = {
+        "allergens": selected_allergens,
+        "rotation_exclusions": rotation_exclusions,
+    }
+    food_db = get_food_db(exclude_allergens=selected_allergens)
+    _record_step(
+        tool_context, "Meal Planning Agent", "filter_foods", "completed",
+        f"Đã lọc danh mục theo {len(selected_allergens)} nhóm loại trừ; còn {len(food_db)} mục.",
+    )
+    if rotation_exclusions:
+        food_db = [food for food in food_db if food["name"] not in rotation_exclusions]
+        _record_step(
+            tool_context, "Meal Planning Agent", "rotate_menu", "completed",
+            f"Đã tạm loại {len(rotation_exclusions)} nguyên liệu từ thực đơn trước để tìm lựa chọn khác.",
+        )
+
+    # 1. Cơ chế tự sửa sai 1: Giới hạn trần giá nguyên liệu khi ngân sách thấp
+    if max_price_per_unit is not None and max_price_per_unit > 0:
+        filtered_by_price = [f for f in food_db if f["price_per_unit"] <= max_price_per_unit]
+        # Đảm bảo vẫn đủ nhóm đạm và tinh bột để bài toán khả thi
+        if any(f["category"] == "protein" for f in filtered_by_price) and any(f["category"] == "carb" for f in filtered_by_price):
+            food_db = filtered_by_price
+            _record_step(
+                tool_context, "Meal Planning Agent", "filter_price_ceiling", "completed",
+                f"Đã tự động đặt trần giá nguyên liệu <= {max_price_per_unit:,.0f}đ/100g để tối ưu cho ngân sách thấp.",
+            )
+
+    # 2. Cơ chế tự sửa sai 2: Loại trừ món lặp hoặc đơn điệu để tăng tính hài hòa
+    if exclude_foods:
+        cleaned_excludes = [x.strip() for x in exclude_foods if x.strip()]
+        if cleaned_excludes:
+            filtered_by_harmony = [f for f in food_db if f["name"] not in cleaned_excludes]
+            if any(f["category"] == "protein" for f in filtered_by_harmony) and any(f["category"] == "carb" for f in filtered_by_harmony):
+                food_db = filtered_by_harmony
+                _record_step(
+                    tool_context, "Meal Planning Agent", "refine_harmony", "completed",
+                    f"Đã tự động loại trừ {', '.join(cleaned_excludes)} để chống lặp món và tăng tính hài hòa.",
+                )
+
     if not food_db:
-        return {"error": "Không còn thực phẩm nào phù hợp sau khi loại trừ dị ứng."}
+        result = {
+            "feasible": False,
+            "meals": [],
+            "total_cost_estimate": None,
+            "message": "Không còn thực phẩm phù hợp với các nhóm đã chọn. Hãy sửa nhóm loại trừ hoặc sở thích.",
+            "suggested_budget": None,
+            "scenarios": None,
+        }
+        tool_context.state["meal_plan_budget"] = {"amount": budget_amount, "period": budget_period}
+        tool_context.state["meal_plan_result"] = result
+        return result
 
     result = optimize_meal_plan(
         macro_targets=macro_targets,
         budget={"amount": budget_amount, "period": budget_period},
         food_db=food_db,
     )
+    _record_step(
+        tool_context, "Meal Planner", "optimize_meal_plan",
+        "feasible" if result.get("feasible") else "needs_user_choice",
+        "Đã tìm phương án trong ngân sách." if result.get("feasible")
+        else "Không có phương án trong ngân sách; giữ nguyên mục tiêu và tính mức tối thiểu.",
+    )
+
+    if reflection_note:
+        result["agent_reflection"] = reflection_note
 
     # Nếu tìm được thực đơn khả thi, Chef Agent tự động sáng tạo tên món và mẹo nấu 15p
     if result.get("feasible") and result.get("meals"):
-        enhanced_meals, advice = enhance_meals_with_chef(result["meals"])
+        enhanced_meals, advice, chef_status = enhance_meals_with_chef(result["meals"])
         result["meals"] = enhanced_meals
         if advice:
             result["ai_advice"] = advice
-
-    # Nếu có kịch bản cứu vãn (Saver scenario), Chef Agent cũng tạo món cho kịch bản đó
-    scenarios = result.get("scenarios")
-    if scenarios and scenarios.get("saver_scenario"):
-        saver_meals = scenarios["saver_scenario"].get("meals")
-        if saver_meals:
-            enh_saver, _ = enhance_meals_with_chef(saver_meals)
-            scenarios["saver_scenario"]["meals"] = enh_saver
+        _record_step(
+            tool_context, "Chef", "suggest_cooking", chef_status,
+            "Đã tạo gợi ý chế biến." if chef_status == "completed"
+            else "Tạm dùng nguyên liệu từ solver; phần gợi ý món có thể thử lại sau.",
+        )
 
     # Ghi lại ngân sách tool đã dùng để route đối chiếu với request gốc, đồng thời
     # phân biệt kết quả của lượt này với kết quả cũ còn sót trong session.

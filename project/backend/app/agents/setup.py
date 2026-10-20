@@ -7,17 +7,21 @@ Route trong main.py chỉ cần gọi run_agent_turn(), không biết chi tiết
 Cần biến môi trường GOOGLE_API_KEY (lấy miễn phí từ Google AI Studio).
 """
 
+import logging
 import os
+import random
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from app.agents.tools import run_nutrition_calculation, generate_meal_plan
+from app.agents.model_fallback import model_candidates, is_retryable_error
 
 APP_NAME = "nutribudget"
-USER_ID = "guest"  # MVP không có tài khoản - ADK yêu cầu user_id nên dùng giá trị cố định
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+USER_ID = "guest"
+logger = logging.getLogger(__name__)
+MODEL = model_candidates()[0]
 
 
 
@@ -32,9 +36,7 @@ Bạn là chuyên gia dinh dưỡng. Khi nhận được thông tin cá nhân c�
 run_nutrition_calculation với ĐÚNG các giá trị người dùng cung cấp.
 
 Sau khi có kết quả, viết 2-4 câu tiếng Việt giải thích dễ hiểu vì sao các con số
-này phù hợp với mục tiêu của người dùng. Nếu kết quả có warnings, PHẢI nhắc lại rõ
-ràng từng cảnh báo, không được bỏ qua hay nói nhẹ đi. Nếu có ghi chú từ người dùng,
-có thể lồng vào lời khuyên nhưng KHÔNG được thay đổi bất kỳ con số nào.
+này phù hợp với mục tiêu của người dùng.
 
 KHÔNG tự tính toán hay ước lượng số liệu - luôn dùng tool.
 """,
@@ -45,28 +47,36 @@ KHÔNG tự tính toán hay ước lượng số liệu - luôn dùng tool.
 meal_planning_agent = Agent(
     name="meal_planning_agent",
     model=MODEL,
-    description="Tạo thực đơn tối ưu chi phí theo ngân sách, dựa trên chỉ tiêu "
-                "dinh dưỡng đã tính trước đó.",
+    description="Tạo và tự phản biện thực đơn tối ưu chi phí theo ngân sách và chỉ tiêu dinh dưỡng.",
     instruction="""
-Bạn nhận ngân sách và ghi chú của người dùng (ghi chú có thể chứa thông tin dị ứng
-hoặc sở thích ăn uống).
+Bạn là Meal Planning Agent thông minh, am hiểu dinh dưỡng và giá cả thị trường sinh viên.
+Bạn có năng lực TỰ SUY LUẬN, PHẢN BIỆN VÀ TỰ SỬA SAI (Self-Reflection & ReAct Loop).
 
-Bước 1 - Đọc kỹ ghi chú, xác định người dùng có THỰC SỰ bị dị ứng hoặc không ăn được
-nhóm nào trong 5 nhóm sau không: seafood (hải sản), dairy (sữa), peanut (đậu phộng),
-gluten, egg (trứng). Chỉ tính là dị ứng khi người dùng nói rõ họ bị dị ứng / không ăn
-được. KHÔNG suy diễn dị ứng từ việc họ chỉ nhắc đến, khen, hoặc nói thích món đó.
-Nếu nghi ngờ, ưu tiên an toàn (coi là có dị ứng).
+Quy trình làm việc của bạn:
 
-Bước 2 - Gọi tool generate_meal_plan với budget_amount, budget_period và allergens
-(danh sách nhóm dị ứng xác định được, rỗng [] nếu không có).
+VÒNG 1 - Tối ưu ban đầu:
+- Luôn gọi tool generate_meal_plan với budget_amount, budget_period và đúng danh sách allergens đã nhận.
 
-Bước 3 - Dựa trên kết quả tool:
-- feasible = true: viết 2-3 câu tiếng Việt giới thiệu thực đơn tự nhiên, nêu tổng chi phí.
-- feasible = false: giải thích rõ lý do bằng tiếng Việt theo message và suggested_budget
-  trong kết quả, gợi ý người dùng tăng ngân sách hoặc điều chỉnh mục tiêu.
-- Tool trả về trường "error": báo lại lỗi đó, không tự bịa thực đơn.
+VÒNG 2 - Quan sát (Observation), Tự phản biện (Reflection) & Tự sửa sai (Self-Correction):
+Dựa trên kết quả trả về từ Vòng 1, bạn KHÔNG vội kết thúc ngay mà hãy tự đánh giá:
 
-KHÔNG tự bịa thực đơn hay số liệu - luôn dùng tool.
+1. Trường hợp thiếu ngân sách (feasible = false):
+   - Phân tích nguyên nhân: Ngân sách hiện tại có thể bị hụt vì danh mục còn chứa các món đắt tiền (như thịt bò, cá hồi, thịt vịt, dầu oliu...).
+   - Hành động tự sửa sai: BẬT VÒNG LẶP GỌI LẠI tool generate_meal_plan lần 2 với:
+     * max_price_per_unit: 18000 (hoặc 20000) để lọc bớt nguyên liệu giá cao.
+     * reflection_note: "Phát hiện ngân sách chưa đủ, tự động giới hạn trần giá nguyên liệu để tối ưu sang nhóm đạm kinh tế (trứng, đậu phụ, cá rô phi, ức gà)."
+
+2. Trường hợp khả thi (feasible = true):
+   - Đánh giá mức độ hài hòa và đa dạng của các bữa ăn:
+     * Kiểm tra xem có món đạm nào bị lặp lại ở cả 2 bữa (ví dụ: trưa trứng gà, tối lại trứng gà; hoặc trưa thịt lợn, tối lại thịt lợn) không?
+     * Nếu thấy thực đơn bị đơn điệu: GỌI LẠI tool generate_meal_plan lần 2 với:
+       * exclude_foods: [tên món bị lặp cần thay thế, ví dụ "Trứng gà"]
+       * reflection_note: "Phát hiện món đạm bị trùng lặp giữa trưa và tối gây ngán, tự động đổi món đạm bữa khác để thực đơn phong phú hơn."
+
+VÒNG 3 - Tổng kết và Diễn giải cho người dùng:
+- Nếu feasible = true: Viết 2-4 câu tiếng Việt tự nhiên, nêu tổng chi phí và GIẢI THÍCH RÕ các bước bạn đã tự phản biện/điều chỉnh (ví dụ: đã chủ động lọc món đắt hoặc đã chống lặp món như thế nào).
+- Nếu feasible = false (dù đã thử tối ưu tiết kiệm): Giải thích mức ngân sách tối thiểu ước tính và các kịch bản trong kết quả (Kịch bản Chuẩn & Kịch bản Tiết kiệm).
+- KHÔNG tự bịa số liệu hay thực đơn ngoài kết quả tool.
 """,
     tools=[generate_meal_plan],
 )
@@ -88,17 +98,35 @@ Không tự trả lời nội dung chuyên môn, luôn chuyển cho agent phù h
 
 
 session_service = InMemorySessionService()
-runner = Runner(agent=supervisor, app_name=APP_NAME, session_service=session_service)
 
 
-async def run_agent_turn(session_id: str, message_text: str, max_retries: int = 3):
-    """Chạy 1 lượt hội thoại qua supervisor, trả về (final_text, session).
+def create_supervisor(model: str):
+    """Create the same tool-constrained workflow with a selected Gemini model."""
+    nutrition = Agent(
+        name="nutrition_agent",
+        model=model,
+        description=nutrition_agent.description,
+        instruction=nutrition_agent.instruction,
+        tools=[run_nutrition_calculation],
+    )
+    meal_planning = Agent(
+        name="meal_planning_agent",
+        model=model,
+        description=meal_planning_agent.description,
+        instruction=meal_planning_agent.instruction,
+        tools=[generate_meal_plan],
+    )
+    return Agent(
+        name="supervisor",
+        model=model,
+        description=supervisor.description,
+        instruction=supervisor.instruction,
+        sub_agents=[nutrition, meal_planning],
+    )
 
-    - Tạo session mới nếu session_id chưa tồn tại.
-    - Có cơ chế retry khi gặp lỗi 503 / quá tải tạm thời từ LLM API.
-    - Số liệu có cấu trúc đọc từ session.state (do tool ghi), final_text chỉ dùng
-      làm phần giải thích bằng ngôn ngữ tự nhiên.
-    """
+
+async def run_agent_turn(session_id: str, message_text: str, max_retries: int = 2):
+    """Run the ADK workflow; retry transient failures, then try configured models."""
     import asyncio
 
     session = await session_service.get_session(
@@ -108,26 +136,82 @@ async def run_agent_turn(session_id: str, message_text: str, max_retries: int = 
         session = await session_service.create_session(
             app_name=APP_NAME, user_id=USER_ID, session_id=session_id
         )
+    session.state["agent_trace"] = []
 
     content = types.Content(role="user", parts=[types.Part(text=message_text)])
+    candidates = model_candidates()
+    last_error = None
+    trace = []
+    actor_labels = {
+        "supervisor": "Supervisor",
+        "nutrition_agent": "Nutrition Agent",
+        "meal_planning_agent": "Meal Planning Agent",
+    }
 
-    for attempt in range(max_retries):
-        try:
-            final_text = None
-            async for event in runner.run_async(
-                user_id=USER_ID, session_id=session_id, new_message=content
-            ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    text = "".join(p.text for p in event.content.parts if p.text)
-                    if text:
-                        final_text = text
+    for model_index, model in enumerate(candidates):
+        runner = Runner(
+            agent=create_supervisor(model),
+            app_name=APP_NAME,
+            session_service=session_service,
+        )
+        for attempt in range(max_retries):
+            try:
+                final_text = None
+                async for event in runner.run_async(
+                    user_id=USER_ID, session_id=session_id, new_message=content
+                ):
+                    author = getattr(event, "author", None)
+                    if author in actor_labels:
+                        trace.append({
+                            "actor": actor_labels[author],
+                            "action": "route_request",
+                            "status": "completed",
+                            "summary": "Đã xử lý lượt yêu cầu.",
+                        })
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            function_call = getattr(part, "function_call", None)
+                            function_name = getattr(function_call, "name", None)
+                            if function_name:
+                                trace.append({
+                                    "actor": "Agent",
+                                    "action": function_name,
+                                    "status": "called",
+                                    "summary": "Đã gọi công cụ có cấu trúc.",
+                                })
+                    if event.is_final_response() and event.content and event.content.parts:
+                        final_text = "".join(p.text for p in event.content.parts if p.text) or final_text
 
-            # Lấy lại session mới nhất - state đã bị tool thay đổi trong lúc chạy
-            session = await session_service.get_session(
-                app_name=APP_NAME, user_id=USER_ID, session_id=session_id
-            )
-            return final_text, session
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise
-            await asyncio.sleep(1.5 * (attempt + 1))
+                session = await session_service.get_session(
+                    app_name=APP_NAME, user_id=USER_ID, session_id=session_id
+                )
+                combined, seen = [], set()
+                for item in trace + session.state.get("agent_trace", []):
+                    key = (item.get("actor"), item.get("action"), item.get("status"))
+                    if key not in seen:
+                        combined.append(item)
+                        seen.add(key)
+                session.state["agent_trace"] = combined
+                return final_text, session
+            except Exception as error:
+                last_error = error
+                if not is_retryable_error(error):
+                    raise
+                if attempt + 1 < max_retries:
+                    delay = min(2 ** attempt, 4) + random.uniform(0, 0.35)
+                    logger.warning(
+                        "Transient Gemini error on model %s; retry %d/%d in %.2fs: %s",
+                        model, attempt + 1, max_retries - 1, delay, error,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                break
+
+        if model_index + 1 < len(candidates):
+            next_model = candidates[model_index + 1]
+            logger.warning("Switching Gemini model from %s to %s after transient errors", model, next_model)
+            await asyncio.sleep(0.5 + random.uniform(0, 0.35))
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Không có Gemini model nào được cấu hình.")

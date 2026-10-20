@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS foods (
     carbs DECIMAL(6,2) NOT NULL CHECK (carbs >= 0),
     fat DECIMAL(6,2) NOT NULL CHECK (fat >= 0),
     allergen_tags TEXT[] NOT NULL DEFAULT '{}',
+    meal_types TEXT[],
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

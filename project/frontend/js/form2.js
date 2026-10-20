@@ -1,28 +1,42 @@
-/* Form 2: ngân sách (+ ghi chú dị ứng/sở thích) -> gọi /meal-plan. */
+/* Ngân sách + lựa chọn dị ứng có cấu trúc -> gọi /meal-plan. */
 (function () {
-  // Thiếu tiền vẫn hiện thực đơn đề xuất (gọi API lần 2). Tắt theo mặc định, chỉ bật khi lead đồng ý.
-  const SHOW_MENU_WHEN_SHORT = false;
   const { $, $$, fmt } = NB;
   const inp = $("#b-amount");
-  const days = () => (NB.state.budget.period === "monthly" ? 30 : 7);
+  const days = () => NB.state.budget.period === "monthly" ? 30 : 7;
   const amount = () => +inp.value.replace(/\D/g, "") || 0;
-
+  const selectedAllergens = () => $$("input[name='allergens']:checked").map(el => el.value);
+  const ALLERGY_CUES = /dị ứng|allergy|không dung nạp|không ăn được|phản ứng với|allergic/i;
+  const ALLERGEN_TERMS = {
+    seafood: /hải sản|cá|tôm|cua|mực|seafood|fish|shrimp|crab/i,
+    dairy: /sữa|phô mai|bơ sữa|dairy|milk|cheese/i,
+    peanut: /đậu phộng|lạc|peanut/i,
+    gluten: /gluten|lúa mì|wheat|lúa mạch|barley/i,
+    egg: /trứng|egg/i,
+    soy: /đậu nành|đậu tương|đậu phụ|đậu hũ|soy|tofu/i,
+    sesame: /mè|vừng|sesame/i,
+  };
+  function validateAllergyNotes() {
+    const notes = $("#b-notes").value.trim();
+    const mentioned = Object.entries(ALLERGEN_TERMS).filter(([, re]) => re.test(notes)).map(([key]) => key);
+    const chosen = selectedAllergens();
+    const ambiguous = ALLERGY_CUES.test(notes) && (!mentioned.length || mentioned.some(key => !chosen.includes(key)));
+    $("#allergen-error").textContent = ambiguous
+      ? "Ghi chú có nhắc đến dị ứng/không dung nạp. Hãy chọn đúng nhóm ở trên hoặc sửa ghi chú để tránh hiểu nhầm."
+      : "";
+    return !ambiguous;
+  }
   function update() {
     const a = amount(), monthly = NB.state.budget.period === "monthly";
     NB.state.budget.amount = a;
-    // Có số tiền là hiện ngay; chưa nhập thì hiện "—"
     $("#b-daily").textContent = a ? fmt(a / days()) + " VND/ngày" : "—";
     $("#b-other-l").textContent = monthly ? "Theo tuần" : "Theo tháng";
     $("#b-other").textContent = a ? fmt(monthly ? (a / 30) * 7 : (a / 7) * 30) + (monthly ? " VND/tuần" : " VND/tháng") : "—";
   }
-
-  // Vừa gõ vừa tự thêm dấu phẩy (900,000). Giữ nguyên vị trí con trỏ và không đụng vào
-  // giá trị khi bộ gõ tiếng Việt đang soạn chữ (isComposing) để không bị chèn/mất số.
   const format = () => {
     const raw = inp.value, pos = inp.selectionStart ?? raw.length;
     const before = raw.slice(0, pos).replace(/\D/g, "").length;
-    const f = fmt(+raw.replace(/\D/g, "").slice(0, 12) || 0);
-    const next = raw.replace(/\D/g, "") === "" ? "" : f;
+    const digits = raw.replace(/\D/g, "").slice(0, 12);
+    const next = digits ? fmt(+digits) : "";
     if (next !== raw) {
       inp.value = next;
       let p = 0, c = 0;
@@ -34,60 +48,50 @@
   };
   inp.addEventListener("input", e => { if (!e.isComposing) format(); });
   inp.addEventListener("compositionend", format);
-
   $$(".tab").forEach(t => t.addEventListener("click", () => {
     $$(".tab").forEach(x => x.classList.toggle("active", x === t));
-    NB.state.budget.period = t.dataset.period;
-    update();
+    NB.state.budget.period = t.dataset.period; update();
   }));
-
-  // Cho result.js dùng: đặt lại ngân sách (vd. áp dụng mức gợi ý)
   NB.setBudget = (amt, period) => {
     NB.state.budget.period = period;
     $$(".tab").forEach(x => x.classList.toggle("active", x.dataset.period === period));
-    inp.value = amt ? fmt(amt) : "";
-    update();
+    inp.value = amt ? fmt(amt) : ""; update();
   };
 
-  $("#budget-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    if (amount() <= 0) { $("#b-err").textContent = "Vui lòng nhập ngân sách lớn hơn 0"; return; }
+  async function generateMealPlan(amt, period, rotationExclusions = []) {
     const m = NB.state.macros;
-    if (!m || !NB.state.session_id) {
-      NB.toast("Vui lòng hoàn thành bước tính dinh dưỡng trước");
-      NB.show("profile");
-      return;
-    }
+    if (!m || !NB.state.session_id) throw new Error("Vui lòng hoàn thành bước tính dinh dưỡng trước.");
+    if (!validateAllergyNotes()) { NB.show("budget"); return; }
+    NB.setBudget(amt, period);
     NB.state.notes = $("#b-notes").value.trim();
-    const { amount: amt, period } = NB.state.budget;
+    NB.state.allergens = selectedAllergens();
     const body = {
       session_id: NB.state.session_id,
       budget: { amount: amt, period },
+      allergens: NB.state.allergens,
       notes: NB.state.notes || null,
+      rotation_exclusions: rotationExclusions,
     };
-    $("#o-budget").textContent = `Ngân sách: ${NB.money(amt)} / ${period === "monthly" ? "tháng" : "tuần"}`;
+    $("#o-budget").textContent = "Ngân sách: " + NB.money(amt) + " / " + (period === "monthly" ? "tháng" : "tuần");
     const ctrl = new AbortController();
     $("#cancel-opt").onclick = () => { ctrl.abort(); NB.show("budget"); };
     NB.show("optimizing");
-    // Thiếu tiền: backend trả infeasible + suggested_budget -> gọi lại với mức tối thiểu để vẫn có thực đơn đề xuất
-    const fetchPlan = async () => {
-      let plan = await NB.post("/api/v1/meal-plan", body, ctrl.signal), suggested = null;
-      if (SHOW_MENU_WHEN_SHORT && !plan.feasible && plan.suggested_budget) {
-        const retry = { ...body, budget: { amount: Math.ceil(plan.suggested_budget * 1.02), period } };
-        try {
-          const p2 = await NB.post("/api/v1/meal-plan", retry, ctrl.signal);
-          if (p2.feasible) { suggested = plan.suggested_budget; plan = p2; }
-        } catch (e) { if (e.name === "AbortError") throw e; }
-      }
-      return { plan, suggested };
-    };
     try {
-      const { plan, suggested } = await NB.loader($("#optimizing"), fetchPlan());
+      const plan = await NB.loader($("#optimizing"), NB.post("/api/v1/meal-plan", body, ctrl.signal));
       NB.state.plan = plan;
-      NB.handlePlan(plan, { budget: { amount: amt, period }, suggested });
+      NB.handlePlan(plan, { budget: { amount: amt, period } });
     } catch (err) {
       if (err.name === "AbortError") return;
       NB.toast(err.message); NB.show("budget");
     }
+  }
+  NB.generateMealPlan = generateMealPlan;
+  $("#budget-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    if (amount() <= 0) { $("#b-err").textContent = "Vui lòng nhập ngân sách lớn hơn 0"; return; }
+    if (!validateAllergyNotes()) return;
+    await generateMealPlan(amount(), NB.state.budget.period);
   });
+  $("#b-notes").addEventListener("input", validateAllergyNotes);
+  $$("input[name='allergens']").forEach(el => el.addEventListener("change", validateAllergyNotes));
 })();

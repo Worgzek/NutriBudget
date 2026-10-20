@@ -3,10 +3,9 @@
 (function () {
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-  const delay = ms => new Promise(r => setTimeout(r, ms));
 
   const NB = window.NB = {
-    API: window.NB_API_URL || "http://localhost:8000",
+    API: window.NB_API_URL || "https://christine-balmy-tasha.ngrok-free.dev",
     state: { profile: null, macros: null, session_id: null, budget: { amount: 0, period: "monthly" }, notes: "", plan: null },
     hooks: {},
     $, $$,
@@ -41,24 +40,10 @@
       return data;
     },
 
-    /* Chạy animation vòng tròn + các bước trong lúc chờ `task` (Promise). */
-    async loader(screen, task, minMs = 1800) {
-      const C = 2 * Math.PI * 34;
-      const ring = $(".ring-fg", screen), pct = $(".ring-pct", screen), steps = $$(".steps li", screen);
-      let p = 0;
-      const set = v => {
-        p = v; ring.style.strokeDashoffset = C * (1 - v / 100);
-        if (pct) pct.textContent = Math.round(v) + "%";
-        const cur = steps.findIndex((_, i) => v < (i + 1) * 30);
-        steps.forEach((li, i) => { li.classList.toggle("done", cur === -1 || i < cur); li.classList.toggle("cur", i === cur); });
-      };
-      set(0);
-      const timer = setInterval(() => set(p + (90 - p) * 0.05), 100);
-      try {
-        const [result] = await Promise.all([task, delay(minMs)]);
-        clearInterval(timer); set(100); await delay(300);
-        return result;
-      } finally { clearInterval(timer); }
+    /* Loader không mô phỏng tiến độ; trace trả về mới là bằng chứng công cụ đã chạy. */
+    async loader(screen, task, minMs = 700) {
+      const [result] = await Promise.all([task, new Promise(resolve => setTimeout(resolve, minMs))]);
+      return result;
     },
   };
 
@@ -66,7 +51,7 @@
   document.addEventListener("keydown", e => {
     if (e.key !== "Enter" || e.isComposing) return;
     const modal = $("#modal");
-    if (modal && !modal.hidden) { e.preventDefault(); $("#m-adjust").click(); return; }
+    if (modal && modal.classList.contains("active")) { e.preventDefault(); $("#m-adjust").click(); return; }
     const t = e.target;
     // nút/link tự xử lý Enter; ô nhập chữ trong <form> đã tự submit
     if (t.closest("button, a, textarea") || (t.tagName === "INPUT" && !["radio", "checkbox"].includes(t.type))) return;
@@ -178,7 +163,6 @@
       height_cm: p.height_cm, weight_kg: p.weight_kg, age: p.age, gender: p.gender,
       activity_level: f.elements.activity.value, goal: GOAL_API[goalUi],
     };
-    $("#calc-goal").textContent = "Ưu tiên mục tiêu " + GOALS.find(g => g[0] === goalUi)[1].toLowerCase();
     NB.show("calc");
     try {
       NB.state.macros = await NB.loader($("#calc"), NB.post("/api/v1/nutrition/macros", body));

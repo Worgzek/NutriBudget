@@ -10,7 +10,10 @@ from app.schemas import (
     MealPlanRequest, MealPlanResponse,
 )
 from app.agents.setup import run_agent_turn, session_service, APP_NAME, USER_ID
+from app.agents.chef import enhance_meals_with_chef
 from app.db import DATABASE_URL
+from app.planner.optimizer import optimize_meal_plan
+from app.planner.query import get_food_db
 
 import os
 import psycopg2
@@ -21,10 +24,51 @@ app = FastAPI(
     version="2.0.0",
 )
 
+
+def _fallback_meal_plan(session, budget, allergens: list[str], rotation_exclusions: list[str]) -> dict:
+    """Chạy Planner xác định khi Agent không tạo kết quả đúng lượt request hiện tại."""
+    food_db = get_food_db(exclude_allergens=allergens)
+    if rotation_exclusions:
+        food_db = [food for food in food_db if food["name"] not in rotation_exclusions]
+
+    if not food_db:
+        result = {
+            "feasible": False,
+            "meals": [],
+            "total_cost_estimate": None,
+            "message": "Không còn thực phẩm phù hợp sau khi áp dụng các lựa chọn hiện tại.",
+            "suggested_budget": None,
+            "scenarios": None,
+        }
+    else:
+        result = optimize_meal_plan(
+            macro_targets=session.state["macro_targets"], budget=budget, food_db=food_db
+        )
+        if result.get("feasible") and result.get("meals"):
+            meals, advice, _ = enhance_meals_with_chef(result["meals"])
+            result["meals"] = meals
+            if advice:
+                result["ai_advice"] = advice
+
+    session.state["meal_plan_budget"] = budget
+    session.state["meal_plan_filters"] = {
+        "allergens": allergens,
+        "rotation_exclusions": rotation_exclusions,
+    }
+    session.state["meal_plan_result"] = result
+    session.state["agent_trace"] = [{
+        "actor": "Meal Planner",
+        "action": "fallback_solver",
+        "status": "completed",
+        "summary": "Đã chạy Solver dự phòng với dữ liệu đã xác nhận cho lượt này.",
+    }]
+    return result
+
 _DEFAULT_ORIGINS = (
     "http://localhost:8000,http://127.0.0.1:8000,"
     "http://localhost:3000,http://127.0.0.1:3000,"
     "http://localhost:5500,http://127.0.0.1:5500"
+    "https://christine-balmy-tasha.ngrok-free.dev"
 )
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -34,8 +78,8 @@ ALLOWED_ORIGINS = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cho phép mọi nguồn gọi vào
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -120,6 +164,7 @@ async def get_nutrition_macros(payload: NutritionRequest):
         carb_g=macro_targets["carb_g"],
         explanation=final_text or "Đã tính xong chỉ tiêu dinh dưỡng của bạn.",
         warning=session.state.get("warnings"),
+        agent_trace=session.state.get("agent_trace", []),
     )
 
 
@@ -134,26 +179,51 @@ async def get_meal_plan(payload: MealPlanRequest):
             detail="Session không tồn tại hoặc đã hết hạn. Vui lòng làm lại từ bước 1.",
         )
 
-    message = f"Ngân sách {payload.budget.amount:.0f} VNĐ theo {payload.budget.period}."
+    selected_allergens = sorted(set(payload.allergens))
+    rotation_exclusions = sorted(set(payload.rotation_exclusions))
+    # Dữ liệu có cấu trúc từ UI là nguồn chính thức để tool dùng lại.
+    # Không phụ thuộc vào việc LLM lặp đúng từng phần tử khi gọi hàm.
+    existing.state["meal_plan_requested_allergens"] = selected_allergens
+    existing.state["meal_plan_rotation_exclusions"] = rotation_exclusions
+    message = (
+        f"Ngân sách {payload.budget.amount:.0f} VNĐ theo {payload.budget.period}. "
+        f"Nhóm cần loại trừ đã được người dùng chọn: "
+        f"{', '.join(selected_allergens) if selected_allergens else 'không có'}; "
+        "hãy truyền đúng danh sách này vào tool."
+    )
     if payload.notes:
         message += f" Ghi chú của người dùng: {payload.notes}"
+    if rotation_exclusions:
+        message += " Người dùng muốn đổi thực đơn; ưu tiên không dùng lại: " + ", ".join(rotation_exclusions) + "."
 
-    final_text, session = await run_agent_turn(payload.session_id, message)
+    try:
+        final_text, session = await run_agent_turn(payload.session_id, message)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("run_agent_turn failed: %s, falling back to deterministic solver", exc)
+        session = existing
 
     result = session.state.get("meal_plan_result")
     used_budget = session.state.get("meal_plan_budget") or {}
+    used_filters = session.state.get("meal_plan_filters") or {}
     if (
         result is None
         or used_budget.get("period") != payload.budget.period
         or abs(used_budget.get("amount", -1) - payload.budget.amount) > 0.5
+        or used_filters.get("allergens", []) != selected_allergens
+        or used_filters.get("rotation_exclusions", []) != rotation_exclusions
     ):
-        # Không có kết quả, hoặc kết quả là của lượt trước / tool bị gọi với ngân sách sai
-        raise HTTPException(
-            status_code=500,
-            detail="Agent không trả về kết quả thực đơn khớp với ngân sách đã nhập.",
+        result = _fallback_meal_plan(
+            session=session,
+            budget={"amount": payload.budget.amount, "period": payload.budget.period},
+            allergens=selected_allergens,
+            rotation_exclusions=rotation_exclusions,
         )
 
-    return MealPlanResponse(**result)
+    return MealPlanResponse(
+        **result,
+        agent_trace=session.state.get("agent_trace", []),
+    )
 
 
 FRONTEND_DIR = _frontend_dir()

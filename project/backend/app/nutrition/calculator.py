@@ -81,11 +81,23 @@ def calculate_macros(
     weight_kg: float,
     calories: float,
     goal: str,
+    height_cm: Optional[float] = None,
 ) -> tuple[float, float, float]:
-    
+    effective_weight = weight_kg
+    if height_cm and height_cm > 0:
+        height_m = height_cm / 100
+        bmi = weight_kg / (height_m ** 2)
+        if bmi >= 25.0:
+            # Đối với người thừa cân/béo phì (BMI >= 25), mô mỡ không có nhu cầu
+            # tiêu thụ protein như khối cơ nạc. Theo chuẩn dinh dưỡng lâm sàng (ESPEN / ASPEN),
+            # tính đạm theo Cân nặng Hiệu chỉnh (Adjusted Body Weight - ABW):
+            # ABW = IBW + 0.25 * (weight_kg - IBW), với IBW tính theo BMI chuẩn 22.0.
+            ideal_weight = 22.0 * (height_m ** 2)
+            effective_weight = ideal_weight + 0.25 * (weight_kg - ideal_weight)
+
     # Protein
     protein_g = (
-        weight_kg * GOAL_PROTEIN_PER_KG[goal]
+        effective_weight * GOAL_PROTEIN_PER_KG[goal]
     )
 
     protein_calories = protein_g * 4
@@ -229,6 +241,7 @@ def calculate_nutrition(
         weight_kg=weight_kg,
         calories=calories,
         goal=goal,
+        height_cm=height_cm,
     )
 
     # 6. Calculate BMI

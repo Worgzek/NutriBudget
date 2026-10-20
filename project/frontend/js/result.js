@@ -10,7 +10,7 @@
   const store = list => { try { localStorage.setItem(KEY, JSON.stringify(list)); return true; } catch (e) { return false; } };
   const refreshCount = () => { $("#saved-count").textContent = load().length; };
   const sum = (meals, k) => meals.reduce((s, m) => s + m.macros[k], 0);
-
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;"}[c]));
   NB.handlePlan = (plan, ctx = {}) =>
     plan.feasible ? renderMenu(plan, ctx.budget || NB.state.budget, ctx.suggested, false) : renderInfeasible(plan);
 
@@ -33,6 +33,17 @@
     $("#menu-saved-label").hidden = $("#delete-saved").hidden = !fromSaved;
     if (fromSaved) $("#menu-saved-label").textContent = "📁 Đã lưu lúc " + new Date(fromSaved).toLocaleString("vi-VN");
     $("#save-menu").disabled = false; $("#save-label").textContent = "Lưu thực đơn";
+    $("#rotate-menu").onclick = () => {
+      const excluded = [...new Map(
+        meals.flatMap(meal => meal.ingredients || []).map(item => [item.name, item])
+      ).values()]
+        .sort((a, b) => b.amount_g - a.amount_g)
+        .slice(0, 3)
+        .map(item => item.name);
+      if (!excluded.length) return;
+      NB.toast("Đang tìm thực đơn khác với nguyên liệu mới");
+      NB.generateMealPlan(amount, period, excluded);
+    };
 
     $("#m-kcal").textContent = fmt(sum(meals, "calories")) + " kcal";
     $("#m-p").textContent = fmt(sum(meals, "protein_g")) + "g";
@@ -65,19 +76,24 @@
       <div class="meal">
         <div class="meal-h">
           <div>
-            <b>${m.meal_name}</b>${m.dish_name ? ` · <span class="dish-title" style="color: #2e7d32;">${m.dish_name}</span>` : ""}
+            <b>${escapeHtml(m.meal_name)}</b>${m.dish_name ? ` · <span class="dish-title" style="color: #2e7d32;">${escapeHtml(m.dish_name)}</span>` : ""}
           </div>
           <span>${money(m.meal_cost)}</span>
         </div>
-        ${m.cooking_tip ? `<div class="cooking-tip" style="background: #f1f8e9; padding: 8px 12px; border-radius: 6px; font-size: 0.88rem; margin: 6px 0 10px; color: #33691e; line-height: 1.4;">💡 <b>Mẹo nấu 15p:</b> ${m.cooking_tip}</div>` : ""}
+        <div class="meal-macros" aria-label="Dinh dưỡng ${escapeHtml(m.meal_name)}">
+          <span><small>Năng lượng</small><b>${fmt(m.macros.calories)} kcal</b></span>
+          <span><small>Đạm</small><b>${fmt(m.macros.protein_g)}g</b></span>
+          <span><small>Béo</small><b>${fmt(m.macros.fat_g)}g</b></span>
+          <span><small>Tinh bột</small><b>${fmt(m.macros.carb_g)}g</b></span>
+        </div>
+        ${m.cooking_tip ? `<div class="cooking-tip" style="background: #f1f8e9; padding: 8px 12px; border-radius: 6px; font-size: 0.88rem; margin: 6px 0 10px; color: #33691e; line-height: 1.4;">💡 <b>Mẹo nấu 15p:</b> ${escapeHtml(m.cooking_tip)}</div>` : ""}
         <div class="rw h"><span>NGUYÊN LIỆU</span><span>LƯỢNG</span><span>CHI PHÍ</span></div>
-        ${m.ingredients.map(i => `<div class="rw"><span>${i.name}</span><span>${fmt(i.amount_g)} g</span><span>${money(i.cost)}</span></div>`).join("")}
-      </div>`).join("") + (plan.ai_advice ? `<div class="chef-advice-card" style="background: #fff8e1; border-left: 4px solid #ffb300; padding: 10px 14px; border-radius: 6px; margin-top: 14px; font-size: 0.9rem; color: #ff6f00;">👨‍🍳 <b>Lời khuyên từ Chef:</b> ${plan.ai_advice}</div>` : "");
+        ${m.ingredients.map(i => `<div class="rw"><span>${escapeHtml(i.name)}</span><span>${fmt(i.amount_g)} g</span><span>${money(i.cost)}</span></div>`).join("")}
+      </div>`).join("") + (plan.agent_reflection ? `<div class="agent-reflection-card" style="background: #e8f5e9; border-left: 4px solid #2e7d32; padding: 10px 14px; border-radius: 6px; margin-top: 14px; font-size: 0.9rem; color: #1b5e20;">🧠 <b>AI tự phản biện & tối ưu:</b> ${escapeHtml(plan.agent_reflection)}</div>` : "") + (plan.ai_advice ? `<div class="chef-advice-card" style="background: #fff8e1; border-left: 4px solid #ffb300; padding: 10px 14px; border-radius: 6px; margin-top: 14px; font-size: 0.9rem; color: #ff6f00;">👨‍🍳 <b>Lời khuyên từ Chef:</b> ${escapeHtml(plan.ai_advice)}</div>` : "");
     NB.show("menu");
   }
 
 
-  // Chỉ còn dùng khi không có mức ngân sách gợi ý khả thi (hoặc gọi lại vẫn thất bại)
   function renderInfeasible(plan) {
     const { amount, period } = NB.state.budget, sug = plan.suggested_budget;
     $("#m-suggest").hidden = !sug;
@@ -90,10 +106,10 @@
     } else {
       $("#m-msg").textContent = plan.message || "Không tìm được thực đơn phù hợp.";
     }
-    $("#m-adjust").textContent = sug ? "Điều chỉnh ngân sách" : "Quay lại";
-    $("#m-adjust").onclick = () => { $("#modal").hidden = true; if (sug) applySuggest(sug, amount, period); };
-    $("#modal").hidden = false;
-    NB.show("budget");
+    $("#m-adjust").disabled = !sug;
+    $("#m-adjust").onclick = () => { if (sug) NB.generateMealPlan(sug, period); };
+    $("#m-edit").onclick = () => NB.show("budget");
+    NB.show("modal");
   }
 
   /* ---- Lưu / xem lại thực đơn ---- */

@@ -1,134 +1,54 @@
-# Technical & Infrastructure Documentation: NutriBudget
+# NutriBudget
 
-> An intelligent web application combining optimization algorithms and an AI Agent to suggest meal plans, balance nutrition, and optimize meal costs for students.
+NutriBudget is a prototype AI Agent for affordable, personalized meal planning. It fits the **Healthcare & Well-being** theme of the “AI Agents – Agent of Change” challenge. The prototype demonstrates a two-step flow: calculate nutrition targets, then plan meals against a user budget.
 
----
+> Educational prototype only. It is not a medical or clinical nutrition service.
 
-## 1. Architecture & Tech Stack Overview
+## What it demonstrates
 
-- **System Architecture:** Decoupled architecture between the independent Frontend and Backend API. Adopts a **Stateless** model (no user profiles stored in the database to optimize security, protect privacy, and reduce system load).
-- **Backend:** Python, FastAPI, Pydantic (strict input data validation).
-- **Database:** PostgreSQL 15, supporting advanced indexing (`GIN index`) for food allergy tag arrays.
-- **Infrastructure & Containerization:** Docker, Docker Compose managing multi-services (Database & Backend).
+- An ADK Supervisor routes profile requests to a Nutrition Agent and budget requests to a Meal Planning Agent.
+- Python computes nutrition targets; the food catalog and PuLP solver perform filtering and cost optimization.
+- Users explicitly select allergy groups (including soy) and can separately enter preference notes.
+- When the budget is too low, original targets stay unchanged. The interface presents an estimated minimum budget and waits for the user to retry or edit constraints.
+- The interface displays verified completed tool actions returned by the backend, not fabricated progress or hidden reasoning.
+- Transient Gemini failures use bounded retries and configured model fallback; Chef suggestions fall back to solver ingredients when unavailable.
 
----
+## User flow
 
-## 2. Project Directory Structure
+1. Enter profile and goal. The prototype accepts users aged 13–100; users under 18 receive an additional caution with the result.
+2. Review calculated daily calories and macros.
+3. Enter a weekly/monthly budget, select exclusions and add optional food preferences.
+4. Review the feasible meal plan or choose how to respond to an infeasible budget.
 
-project/
-├── backend/
-│   ├── app/
-│   │   ├── main.py        # FastAPI initialization, CORS, Health check endpoints
-│   │   └── schemas.py     # Pydantic models definition (Stateless payload)
-│   └── requirements.txt   # Dependencies list
-├── database/
-│   └── schema.sql         # Initialization script for foods and request_logs tables
-├── frontend/              # Frontend source code directory (HTML/JS)
-├── .env                   # Secure environment variables (Database credentials)
-├── .gitignore             # Ignored files and folders for Git
-└── docker-compose.yaml    # Container orchestration (db, backend)
-└── Dockerfile             # Python/FastAPI environment containerization
+## Stack
 
----
+| Layer | Technology | Responsibility |
+|---|---|---|
+| Frontend | HTML, CSS, JavaScript | Two-step form, verified action trace and results |
+| API | FastAPI, Pydantic | Request validation and session-based routes |
+| Agent | Google ADK, Gemini API | Request routing and grounded explanation |
+| Nutrition | Python | Deterministic nutrition calculation |
+| Optimization | PuLP | Meal-plan feasibility and cost optimization |
+| Data | PostgreSQL, SQL seed data | Food nutrition, prices and allergen tags |
+| Runtime | Docker Compose | Local backend and database |
 
-## 3. Database Schema (Stateless)
+## Run locally
 
-The entire database structure is initialized automatically via the `database/schema.sql` file:
+1. Copy `.env.example` to `.env`, then set database credentials and `GOOGLE_API_KEY`.
+2. Optionally configure the Gemini model order with `GEMINI_MODEL` and `GEMINI_FALLBACK_MODELS`.
+3. Run `docker compose up --build`.
+4. Open [http://localhost:8000](http://localhost:8000); API docs: [http://localhost:8000/docs](http://localhost:8000/docs).
 
-    -- 1. Foods table - Input for the optimize_meal_plan() algorithm
-    CREATE TABLE IF NOT EXISTS foods (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        category VARCHAR(50) NOT NULL
-            CHECK (category IN ('protein', 'carb', 'vegetable', 'fruit', 'dairy', 'fat', 'other')),
-        price_per_unit DECIMAL(10,2) NOT NULL CHECK (price_per_unit >= 0),
-        unit VARCHAR(50) NOT NULL DEFAULT '100g',
-        calories DECIMAL(6,2) NOT NULL CHECK (calories >= 0),
-        protein DECIMAL(6,2) NOT NULL CHECK (protein >= 0),
-        carbs DECIMAL(6,2) NOT NULL CHECK (carbs >= 0),
-        fat DECIMAL(6,2) NOT NULL CHECK (fat >= 0),
-        allergen_tags TEXT[] NOT NULL DEFAULT '{}',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+Frontend development can also serve the `frontend/` directory separately; set `window.NB_API_URL` to the backend URL when needed.
 
-    -- Optimized lookup indexing
-    CREATE INDEX IF NOT EXISTS idx_foods_allergen_tags ON foods USING GIN (allergen_tags);
-    CREATE INDEX IF NOT EXISTS idx_foods_category ON foods (category);
+## Key files
 
-    -- 2. Request logs table
-    CREATE TABLE IF NOT EXISTS request_logs (
-        id SERIAL PRIMARY KEY,
-        endpoint VARCHAR(100) NOT NULL,       -- 'nutrition/macros' or 'meal-plan'
-        request_payload JSONB NOT NULL,
-        response_payload JSONB NOT NULL,
-        feasible BOOLEAN,                      -- null for macros endpoint, true/false for meal-plan
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+- `backend/app/main.py` — API routes and request/result checks
+- `backend/app/agents/setup.py` — ADK workflow, retries and model fallback
+- `backend/app/agents/tools.py` — tool implementations and trace events
+- `backend/app/planner/optimizer.py` — PuLP meal-plan solver
+- `database/seed.sql` — food catalog seed data
+- `frontend/` — prototype UI
+- `docs/AGENT_FLOW.md` — detailed flow and contracts
 
-    CREATE INDEX IF NOT EXISTS idx_logs_endpoint ON request_logs (endpoint);
-    CREATE INDEX IF NOT EXISTS idx_logs_created_at ON request_logs (created_at);
-
----
-
-## 4. Pydantic Schemas (backend/app/schemas.py)
-
-Data structure used to validate incoming payloads according to the stateless model:
-
-    from pydantic import BaseModel, Field
-    from typing import List
-    from datetime import datetime
-
-    class UserProfilePayload(BaseModel):
-        age: int = Field(..., gt=0, description="User age")
-        weight: float = Field(..., gt=0, description="Weight in kg")
-        height: float = Field(..., gt=0, description="Height in cm")
-        gender: str = Field(..., description="Gender: 'male' or 'female'")
-        activity_level: str = Field(..., description="Activity level")
-        goal: str = Field(..., description="Goal: lose_weight, maintain, gain_muscle")
-        budget_limit: float = Field(..., ge=0, description="Maximum budget (VND)")
-        allergies: List[str] = Field(default=[], description="List of allergies to exclude")
-
-    class MealPlanRequest(BaseModel):
-        profile: UserProfilePayload
-        target_meals_count: int = Field(default=3, description="Number of meals per day")
-
-    class FoodCreate(BaseModel):
-        name: str
-        category: str
-        price_per_unit: float
-        unit: str = "100g"
-        calories: float
-        protein: float
-        carbs: float
-        fat: float
-        allergen_tags: List[str] = []
-
-    class FoodResponse(FoodCreate):
-        id: int
-        created_at: datetime
-
-        class Config:
-            from_attributes = True
-
----
-
-## 5. Logic Separation & AI Agent
-
-- **Core Logic (Deterministic Code):** Basic biometric indices like BMR, TDEE, and macro targets are calculated with absolute precision using pure Python mathematical functions, ensuring ultra-fast response times and zero computational error.
-- **AI Agent (Gemini API):** Takes charge of advanced optimization in the `optimize_meal_plan()` step, performing natural semantic analysis, flexible allergy filtering, and combining food items to precisely match a student's budget.
-
----
-
-## 6. Quick Start Guide
-
-1. Configure environment variables (`.env`):
-   POSTGRES_USER=postgres
-   POSTGRES_PASSWORD=postgres
-   POSTGRES_DB=nutribudget
-
-2. Start the system using Docker Compose:
-   docker compose up --build
-
-3. Verify operation status:
-   - FastAPI Root: http://localhost:8000/
-   - Check Database Connection: http://localhost:8000/health/db
+See `docs/` for the project concept, stack and team task documents. Never commit `.env` or API keys.
