@@ -122,7 +122,7 @@ This hybrid approach combines the flexibility of LLMs with more predictable nume
 | PuLP | Constrained optimization |
 | PostgreSQL | Relational data storage |
 | Docker | Containerized development and deployment |
-| React + Vite | Frontend, if enabled in the deployed project |
+| HTML + CSS +JS | Frontend |
 
 ## 🔌 API Overview
 
@@ -151,8 +151,8 @@ For the exact request schemas, response formats, and validation rules, refer to 
 1. Clone the repository:
 
    ```bash
-   git clone <YOUR_REPOSITORY_URL>
-   cd <YOUR_PROJECT_DIRECTORY>
+   git clone https://github.com/Worgzek/NutriBudget
+   cd project
    ```
 
 2. Configure the environment variables required by the backend.
